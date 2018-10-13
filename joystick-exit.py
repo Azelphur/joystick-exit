@@ -1,5 +1,6 @@
 #!/usr/bin/python
 
+import sys
 import pygame
 import argparse
 import time
@@ -7,6 +8,9 @@ import subprocess
 import psutil
 import logging
 import shlex
+import os
+import re
+from subprocess import PIPE, Popen
 
 parser = argparse.ArgumentParser(description='Joystick exit')
 parser.add_argument('--joysticks', type=int, help='Joystick numbers to listen for, omit to listen to all joysticks', nargs='+')
@@ -40,53 +44,32 @@ DOWN_AT = None
 
 clock = pygame.time.Clock()
 
-def kill_proc_tree(pid, including_parent=True):    
-    parent = psutil.Process(pid)
-    children = parent.children(recursive=True)
-    for child in children:
-        logging.info('Killing child pid %d', child.pid)
-        child.kill()
-    psutil.wait_procs(children, timeout=5)
-    if including_parent:
-        parent.kill()
-
 def kill_process():
-    if args.kill_children:
-        kill_proc_tree(PROCESS.pid)
+    title = get_active_window_title()
+    print("Killing", title)
+    if title != "EmulationStation":
+        os.system("wmctrl -c :ACTIVE:")
+
+def get_active_window_title():
+    root = subprocess.Popen(['xprop', '-root', '_NET_ACTIVE_WINDOW'], stdout=subprocess.PIPE)
+    stdout, stderr = root.communicate()
+
+    m = re.search(b'^_NET_ACTIVE_WINDOW.* ([\w]+)$', stdout)
+    if m != None:
+        window_id = m.group(1)
+        window = subprocess.Popen(['xprop', '-id', window_id, 'WM_NAME'], stdout=subprocess.PIPE)
+        stdout, stderr = window.communicate()
     else:
-        PROCESS.kill()
+        return None
 
-PROCESS = None
+    match = re.match(b"WM_NAME\(\w+\) = (?P<name>.+)$", stdout)
+    if match != None:
+        return match.group("name").decode('utf-8').strip('"')
+        #return match.group("name").decode('utf-8')
 
-if args.program:
-    p = subprocess.Popen(shlex.split(args.program), shell=False).pid
-    PROCESS = psutil.Process(pid=p)
-    logging.info('Spawned process %d', PROCESS.pid)
-elif args.existing_program:
-    for i in range(args.wait_for_start):
-        for proc in psutil.process_iter():
-            if proc.name() == args.existing_program:
-                PROCESS = proc
-                break
-        if PROCESS:
-            logging.info('Found process %d', PROCESS.pid)
-            break
-        logging.info('Process not found, retrying')
-        time.sleep(1)
-
-if not PROCESS:
-    logging.error('Process not found, you must specify either --program or --existing-program')
-    exit()
+    return None
 
 while True:
-    try:
-        if PROCESS.status() == 'zombie':
-            logging.info('Process is a zombie, exiting.')
-            break
-    except psutil.NoSuchProcess:
-        logging.info('Process no longer exists, exiting.')
-        break
-
     for event in pygame.event.get():
         if event.type == pygame.JOYBUTTONDOWN:
             logging.info('Joystick %d Button %d is down', event.joy, event.button)
@@ -99,12 +82,15 @@ while True:
                     kill_process()
         if event.type == pygame.JOYBUTTONUP:
             logging.info('Joystick %d Button %d is up', event.joy, event.button)
-            BUTTONS.remove(event.button)
+            try:
+                BUTTONS.remove(event.button)
+            except ValueError:
+                pass
             if set(BUTTONS) != set(args.buttons):
                 logging.info('Buttons are up at %d', time.time())
                 DOWN_AT = None
     if DOWN_AT and time.time() - DOWN_AT >= args.hold:
         logging.info('Buttons have been held down for %d seconds, killing process', args.hold)
         kill_process()
-        break
+        DOWN_AT = None
     clock.tick(2)
